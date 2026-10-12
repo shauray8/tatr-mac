@@ -14,11 +14,45 @@ fi
 B=$'\e[1m'; D=$'\e[2m'; R=$'\e[0m'; C=$'\e[36m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35m'
 section() { printf '%s%s── %s%s\n' "$B" "$C" "$1" "$R"; }
 
+child_repos() {
+  find . -mindepth 2 -maxdepth 2 -name .git 2>/dev/null | sed 's|^\./||; s|/\.git$||' | sort
+}
+
+draw_tasks() {
+  if command -v tt >/dev/null && [ "$(tt count 2>/dev/null)" != 0 ]; then
+    section "tasks"
+    TT_COLOR=0 tt ls 2>/dev/null | head -"${1:-5}" | cut -c18- | sed 's/^/  /'
+  fi
+}
+
+# Outside a repo: list repos one level down with branch and dirty count.
+draw_repo_list() {
+  local repos="$1" r b n
+  printf '%s%s%s  %snot a git repo%s\n' "$B" "$(basename "$PWD")" "$R" "$D" "$R"
+  if [ -n "$repos" ]; then
+    section "repos here"
+    while read -r r; do
+      b=$(git -C "$r" branch --show-current 2>/dev/null)
+      n=$(git -C "$r" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+      printf '  %-20s %s%s%s %s\n' "$r" "$G" "${b:-detached}" "$R" "$([ "$n" != 0 ] && echo "${Y}~$n${R}")"
+    done <<<"$repos"
+  fi
+  draw_tasks 20
+}
+
 draw() {
   local rows cols
   rows=$(tput lines); cols=$(tput cols)
   if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "not a git repo: $PWD"; return
+    local repos; repos=$(child_repos)
+    if [ -n "$repos" ] && [ "$(wc -l <<<"$repos")" -eq 1 ]; then
+      cd "$repos" || return
+      draw
+      cd - >/dev/null || true
+    else
+      draw_repo_list "$repos"
+    fi
+    return
   fi
   local top branch up ab
   top=$(git rev-parse --show-toplevel)
@@ -47,10 +81,7 @@ draw() {
   local st; st=$(git -c color.status=always status --short | head -8)
   if [ -n "$st" ]; then sed 's/^/  /' <<<"$st"; else echo "  ${D}clean${R}"; fi
 
-  if command -v tt >/dev/null && [ "$(tt count 2>/dev/null)" != 0 ]; then
-    section "tasks"
-    TT_COLOR=0 tt ls 2>/dev/null | head -5 | cut -c18- | sed 's/^/  /'
-  fi
+  draw_tasks 5
 
   section "log"
   local used=$(( 14 + $(git remote | wc -l) ))

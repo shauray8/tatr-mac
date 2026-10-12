@@ -68,7 +68,7 @@ source-file /path/to/tatr-mac/tmux/tatr-mac.tmux
 |------------|-----------------------------------------------------------------|
 | prefix `T` | task popup: enter edit, ctrl-x close, ctrl-n new, ctrl-s cycle state, ctrl-a show all |
 | prefix `g` | lazygit popup                                                   |
-| prefix `G` | toggle a live git dashboard pane (branch, upstream, remotes, worktrees, stashes, changes, log graph, tasks) |
+| prefix `G` | toggle a live git dashboard pane (branch, upstream, remotes, worktrees, stashes, changes, log graph, tasks). Outside a repo it uses the single repo one level down, or lists them all |
 | prefix `B` | fuzzy branch checkout                                           |
 
 The status bar shows branch, upstream, ahead/behind, staged/changed/untracked
