@@ -51,9 +51,22 @@ tt note ID "found the root cause"
 tt pick                     # fzf picker
 ```
 
-`ID` is any unique piece of the HUID or title. Tasks dir: `$TT_DIR`, else the
-nearest `tasks/` walking up from the current directory, else `$TT_DEFAULT_DIR`
-(`~/.tasks`).
+`ID` is any unique piece of the HUID or title.
+
+### Where tasks show up
+Tasks belong to the directory that holds `tasks/`. They are visible there and in
+every directory below it, never above it: from a parent or unrelated directory
+`tt` lists nothing and `tt new` refuses. Resolution order: `$TT_DIR`, then the
+nearest `tasks/` in the current directory or a parent, then `$TT_DEFAULT_DIR`
+(`~/.tasks`) only while global mode is on.
+
+```sh
+tt init              # start tasks/ in the current directory
+tt global on|off     # global fallback; ctrl-g toggles it in the popup
+```
+
+The popup prompt shows `[here: <project>]` or `[global: <project>]`, and the
+status bar marks global mode with a `g`.
 
 Only tag filtering is implemented, not the full Tatr Query Language.
 
@@ -67,7 +80,7 @@ source-file /path/to/tatr-mac/tmux/tatr-mac.tmux
 
 | Key        | What                                                            |
 |------------|-----------------------------------------------------------------|
-| prefix `T` | task popup: enter edit, ctrl-x close, ctrl-n new, ctrl-s cycle state, ctrl-a show all |
+| prefix `T` | task popup: enter edit, ctrl-x close, ctrl-n new, ctrl-s cycle state, ctrl-a show all, ctrl-g global mode |
 | prefix `g` | lazygit popup                                                   |
 | prefix `G` | toggle a live git dashboard pane (branch, upstream, remotes, worktrees, stashes, changes, log graph, tasks). Outside a repo it uses the single repo one level down, or lists them all |
 | prefix `B` | fuzzy branch checkout                                           |

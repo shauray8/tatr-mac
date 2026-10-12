@@ -10,9 +10,13 @@
   tt note ID text...          append a dated note
   tt pick                     fzf picker (used by the tmux popup)
   tt count                    number of open tasks (for the status bar)
+  tt init                     start a tasks/ dir in the current directory
+  tt global [on|off|toggle]   outside any project, fall back to $TT_DEFAULT_DIR (default: off)
 
 ID may be any unique prefix/suffix/substring of the HUID or the title.
-Tasks dir: $TT_DIR, else nearest ./tasks walking up from cwd, else $TT_DEFAULT_DIR (~/.tasks).
+Tasks dir: $TT_DIR, else the nearest tasks/ in the cwd or a parent (so a project's tasks show
+in it and every directory below it, never above it), else $TT_DEFAULT_DIR (~/.tasks) only
+while global mode is on.
 """
 import datetime
 import os
@@ -23,17 +27,30 @@ import subprocess
 import sys
 
 DEFAULT_DIR = pathlib.Path(os.environ.get("TT_DEFAULT_DIR", pathlib.Path.home() / ".tasks"))
+GLOBAL_FLAG = pathlib.Path.home() / ".config" / "tt" / "global"
 PROP = re.compile(r"^- ([A-Z_]+): ?(.*)$")
 COLOR = {"doing": 33, "blocked": 31, "review": 35, "verify": 36, "todo": 37}
 
 
-def tasks_dir() -> pathlib.Path:
+def is_tasks_dir(d: pathlib.Path) -> bool:
+    # tasks/.tt marks a project started with `tt init` before its first task exists.
+    return d.is_dir() and ((d / ".tt").exists() or any(d.glob("*/TASK.md")))
+
+
+def tasks_dir() -> pathlib.Path | None:
     if os.environ.get("TT_DIR"):
         return pathlib.Path(os.environ["TT_DIR"])
     for d in [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]:
-        if (d / "tasks").is_dir() and any((d / "tasks").glob("*/TASK.md")):
+        if is_tasks_dir(d / "tasks"):
             return d / "tasks"
-    return DEFAULT_DIR
+    return DEFAULT_DIR if GLOBAL_FLAG.exists() else None
+
+
+def require_tasks_dir() -> pathlib.Path:
+    d = tasks_dir()
+    if d is None:
+        sys.exit("tt: no tasks/ here or above; run `tt init` to start one, or `tt global on`")
+    return d
 
 
 class Task:
@@ -82,7 +99,10 @@ class Task:
 
 
 def load_all() -> list[Task]:
-    tasks = [Task(p) for p in sorted(tasks_dir().glob("*/TASK.md"))]
+    d = tasks_dir()
+    if d is None:
+        return []
+    tasks = [Task(p) for p in sorted(d.glob("*/TASK.md"))]
     return sorted(tasks, key=lambda t: (not t.open, t.priority, t.id))
 
 
@@ -122,7 +142,7 @@ def cmd_ls(args: list[str]) -> None:
 
 
 def new_huid() -> str:
-    d = tasks_dir()
+    d = require_tasks_dir()
     now = datetime.datetime.now(datetime.timezone.utc)
     while (d / now.strftime("%Y%m%d-%H%M%S")).exists():
         now += datetime.timedelta(seconds=1)
@@ -141,7 +161,7 @@ def cmd_new(args: list[str]) -> None:
             words.append(a)
     if not words:
         sys.exit("tt new: need a title")
-    d = tasks_dir() / new_huid()
+    d = require_tasks_dir() / new_huid()
     d.mkdir(parents=True)
     (d / "TASK.md").write_text(
         f"# {' '.join(words)}\n- STATUS: OPEN\n- PRIORITY: {prio}\n- TAGS: {tags}\n- STATE: todo\n"
@@ -160,13 +180,15 @@ def cmd_pick() -> None:
     if not shutil.which("fzf"):
         sys.exit("tt pick needs fzf")
     me = os.path.realpath(__file__)
-    env = {**os.environ, "TT_DIR": str(tasks_dir()), "TT_COLOR": "1"}
-    header = "enter: edit | ctrl-x: close | ctrl-r: reopen | ctrl-n: new | ctrl-s: cycle state | ctrl-a: all/open | esc: quit"
+    # No TT_DIR here: every reload re-resolves from the cwd, so ctrl-g takes effect at once.
+    env = {**os.environ, "TT_COLOR": "1"}
+    header = "enter: edit | ctrl-x: close | ctrl-r: reopen | ctrl-n: new | ctrl-s: cycle state | ctrl-a: all/open | ctrl-g: global | esc: quit"
     subprocess.run(
         [
             "fzf", "--ansi", "--reverse", "--no-sort", "--header", header,
             "--preview", f"{me} show {{1}}", "--preview-window", "right,55%,wrap",
-            "--bind", f"start:reload({me} ls)",
+            "--bind", f"start:reload({me} ls)+transform-prompt({me} where)",
+            "--bind", f"ctrl-g:execute-silent({me} global toggle)+reload({me} ls)+transform-prompt({me} where)",
             "--bind", f"enter:execute({me} edit {{1}})+reload({me} ls)",
             "--bind", f"ctrl-x:execute-silent({me} close {{1}})+reload({me} ls)",
             "--bind", f"ctrl-r:execute-silent({me} reopen {{1}})+reload({me} ls all)",
@@ -193,6 +215,24 @@ def main(argv: list[str]) -> None:
     if cmd == "prompt-new":
         title = input("new task title: ").strip()
         return cmd_new([title]) if title else None
+    if cmd == "init":
+        (pathlib.Path.cwd() / "tasks").mkdir(exist_ok=True)
+        (pathlib.Path.cwd() / "tasks" / ".tt").touch()
+        return print(pathlib.Path.cwd() / "tasks")
+    if cmd == "global":
+        mode = args[0] if args else "status"
+        if mode == "toggle":
+            mode = "off" if GLOBAL_FLAG.exists() else "on"
+        if mode == "on":
+            GLOBAL_FLAG.parent.mkdir(parents=True, exist_ok=True)
+            GLOBAL_FLAG.touch()
+        elif mode == "off":
+            GLOBAL_FLAG.unlink(missing_ok=True)
+        return print(f"global: {'on' if GLOBAL_FLAG.exists() else 'off'} ({DEFAULT_DIR})")
+    if cmd == "where":
+        d = tasks_dir()
+        mode = "global" if GLOBAL_FLAG.exists() and d == DEFAULT_DIR else "here"
+        return print(f"[{mode}: {d.parent.name if d else 'no tasks'}] > ")
     if cmd in ("-h", "--help", "help") or not args:
         sys.exit(__doc__)
     t = find(args[0])
