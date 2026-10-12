@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""tt - tiny task tracker using tatr's on-disk format (tasks/<HUID>/TASK.md).
+
+  tt                          list open tasks
+  tt ls [all|closed] [:tag]   list (default: open), filter by tags
+  tt new "title" [-p N] [-t tag,tag]
+  tt show ID | edit ID | close ID | reopen ID
+  tt state ID doing|blocked|review|todo   finer state, kept as a STATE property
+  tt note ID text...          append a dated note
+  tt pick                     fzf picker (used by the tmux popup)
+  tt count                    number of open tasks (for the status bar)
+
+ID may be any unique prefix/suffix/substring of the HUID or the title.
+Tasks dir: $TT_DIR, else nearest ./tasks walking up from cwd, else $TT_DEFAULT_DIR (~/.tasks).
+"""
+import datetime
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+DEFAULT_DIR = pathlib.Path(os.environ.get("TT_DEFAULT_DIR", pathlib.Path.home() / ".tasks"))
+PROP = re.compile(r"^- ([A-Z_]+): ?(.*)$")
+COLOR = {"doing": 33, "blocked": 31, "review": 35, "verify": 36, "todo": 37}
+
+
+def tasks_dir() -> pathlib.Path:
+    if os.environ.get("TT_DIR"):
+        return pathlib.Path(os.environ["TT_DIR"])
+    for d in [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]:
+        if (d / "tasks").is_dir() and any((d / "tasks").glob("*/TASK.md")):
+            return d / "tasks"
+    return DEFAULT_DIR
+
+
+class Task:
+    def __init__(self, path: pathlib.Path):
+        self.path = path
+        self.id = path.parent.name
+        self.lines = path.read_text().splitlines()
+        self.title = self.lines[0][2:].strip() if self.lines else ""
+        self.props = {}
+        for line in self.lines[1:]:
+            m = PROP.match(line)
+            if not m:
+                break
+            self.props[m.group(1)] = m.group(2)
+
+    @property
+    def open(self) -> bool:
+        return self.props.get("STATUS", "OPEN") == "OPEN"
+
+    @property
+    def tags(self) -> list[str]:
+        return [t.strip() for t in self.props.get("TAGS", "").split(",") if t.strip()]
+
+    @property
+    def priority(self) -> int:
+        try:
+            return int(self.props.get("PRIORITY", "50"))
+        except ValueError:
+            return 50
+
+    def set_prop(self, key: str, value: str) -> None:
+        for i, line in enumerate(self.lines[1:], start=1):
+            m = PROP.match(line)
+            if not m:
+                self.lines.insert(i, f"- {key}: {value}")
+                break
+            if m.group(1) == key:
+                self.lines[i] = f"- {key}: {value}"
+                break
+        else:
+            self.lines.append(f"- {key}: {value}")
+        self.save()
+
+    def save(self) -> None:
+        self.path.write_text("\n".join(self.lines).rstrip() + "\n")
+
+
+def load_all() -> list[Task]:
+    tasks = [Task(p) for p in sorted(tasks_dir().glob("*/TASK.md"))]
+    return sorted(tasks, key=lambda t: (not t.open, t.priority, t.id))
+
+
+def find(key: str) -> Task:
+    tasks = load_all()
+    key_l = key.lower().lstrip("#")
+    hits = [t for t in tasks if t.id == key] or [
+        t for t in tasks if key_l in t.id.lower() or key_l in t.title.lower()
+    ]
+    if len(hits) != 1:
+        sys.exit(f"tt: {len(hits)} tasks match '{key}'")
+    return hits[0]
+
+
+def fmt(t: Task, color: bool) -> str:
+    state = t.props.get("STATE", "todo") if t.open else "closed"
+    tags = f" [{', '.join(t.tags)}]" if t.tags else ""
+    line = f"{t.id}  {t.priority:>3}  {state:8} {t.title}{tags}"
+    if not color:
+        return line
+    code = 90 if not t.open else COLOR.get(state, 37)
+    return f"\033[{code}m{line}\033[0m"
+
+
+def cmd_ls(args: list[str]) -> None:
+    which = "open"
+    if args and args[0] in ("all", "closed"):
+        which = args.pop(0)
+    want = {a.lstrip(":") for a in args if a.startswith(":")}
+    color = sys.stdout.isatty() or os.environ.get("TT_COLOR") == "1"
+    for t in load_all():
+        if which == "open" and not t.open or which == "closed" and t.open:
+            continue
+        if want and not want <= set(t.tags):
+            continue
+        print(fmt(t, color))
+
+
+def new_huid() -> str:
+    d = tasks_dir()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    while (d / now.strftime("%Y%m%d-%H%M%S")).exists():
+        now += datetime.timedelta(seconds=1)
+    return now.strftime("%Y%m%d-%H%M%S")
+
+
+def cmd_new(args: list[str]) -> None:
+    prio, tags, words = "50", "", []
+    it = iter(args)
+    for a in it:
+        if a == "-p":
+            prio = next(it)
+        elif a == "-t":
+            tags = ", ".join(x.strip() for x in next(it).split(","))
+        else:
+            words.append(a)
+    if not words:
+        sys.exit("tt new: need a title")
+    d = tasks_dir() / new_huid()
+    d.mkdir(parents=True)
+    (d / "TASK.md").write_text(
+        f"# {' '.join(words)}\n- STATUS: OPEN\n- PRIORITY: {prio}\n- TAGS: {tags}\n- STATE: todo\n"
+    )
+    print(d.name)
+
+
+def cmd_note(t: Task, text: str) -> None:
+    if "## Notes" not in t.lines:
+        t.lines += ["", "## Notes"]
+    t.lines.append(f"- ({datetime.date.today().isoformat()}) {text}")
+    t.save()
+
+
+def cmd_pick() -> None:
+    if not shutil.which("fzf"):
+        sys.exit("tt pick needs fzf")
+    me = os.path.realpath(__file__)
+    env = {**os.environ, "TT_DIR": str(tasks_dir()), "TT_COLOR": "1"}
+    header = "enter: edit | ctrl-x: close | ctrl-r: reopen | ctrl-n: new | ctrl-s: cycle state | ctrl-a: all/open | esc: quit"
+    subprocess.run(
+        [
+            "fzf", "--ansi", "--reverse", "--no-sort", "--header", header,
+            "--preview", f"{me} show {{1}}", "--preview-window", "right,55%,wrap",
+            "--bind", f"start:reload({me} ls)",
+            "--bind", f"enter:execute({me} edit {{1}})+reload({me} ls)",
+            "--bind", f"ctrl-x:execute-silent({me} close {{1}})+reload({me} ls)",
+            "--bind", f"ctrl-r:execute-silent({me} reopen {{1}})+reload({me} ls all)",
+            "--bind", f"ctrl-s:execute-silent({me} cycle {{1}})+reload({me} ls)",
+            "--bind", f"ctrl-a:reload({me} ls all)",
+            "--bind", f"ctrl-n:execute({me} prompt-new)+reload({me} ls)",
+        ],
+        env=env,
+        input="",
+        text=True,
+    )
+
+
+def main(argv: list[str]) -> None:
+    cmd, args = (argv[0], argv[1:]) if argv else ("ls", [])
+    if cmd == "ls":
+        return cmd_ls(args)
+    if cmd == "count":
+        return print(sum(t.open for t in load_all()))
+    if cmd == "new":
+        return cmd_new(args)
+    if cmd == "pick":
+        return cmd_pick()
+    if cmd == "prompt-new":
+        title = input("new task title: ").strip()
+        return cmd_new([title]) if title else None
+    if cmd in ("-h", "--help", "help") or not args:
+        sys.exit(__doc__)
+    t = find(args[0])
+    if cmd == "show":
+        print(t.path.read_text().rstrip())
+    elif cmd == "edit":
+        subprocess.run([os.environ.get("EDITOR", "vim"), str(t.path)])
+    elif cmd == "close":
+        t.set_prop("STATUS", "CLOSED")
+    elif cmd == "reopen":
+        t.set_prop("STATUS", "OPEN")
+    elif cmd == "state":
+        t.set_prop("STATE", args[1])
+    elif cmd == "cycle":
+        order = ["todo", "doing", "blocked", "review"]
+        cur = t.props.get("STATE", "todo")
+        t.set_prop("STATE", order[(order.index(cur) + 1) % len(order)] if cur in order else "todo")
+    elif cmd == "note":
+        cmd_note(t, " ".join(args[1:]))
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Live git dashboard for a side pane: branch/upstream, remotes, worktrees, stashes,
+# changed files, log graph, open tasks. Refreshes every 3s; q quits.
+#   git-dash            run in current dir
+#   git-dash --toggle P open/close the dashboard pane in the current tmux window for path P
+if [ "$1" = "--toggle" ]; then
+  pane=$(tmux list-panes -F '#{pane_id} #{@gitdash}' | awk '$2=="1"{print $1; exit}')
+  if [ -n "$pane" ]; then tmux kill-pane -t "$pane"; exit 0; fi
+  new=$(tmux split-window -h -d -l 42% -c "${2:-$PWD}" -P -F '#{pane_id}' "$0")
+  tmux set -p -t "$new" @gitdash 1
+  exit 0
+fi
+
+B=$'\e[1m'; D=$'\e[2m'; R=$'\e[0m'; C=$'\e[36m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35m'
+section() { printf '%s%s── %s%s\n' "$B" "$C" "$1" "$R"; }
+
+draw() {
+  local rows cols
+  rows=$(tput lines); cols=$(tput cols)
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "not a git repo: $PWD"; return
+  fi
+  local top branch up ab
+  top=$(git rev-parse --show-toplevel)
+  branch=$(git branch --show-current); branch=${branch:-"(detached $(git rev-parse --short HEAD))"}
+  up=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null)
+  ab=$([ -n "$up" ] && git rev-list --left-right --count "HEAD...$up" 2>/dev/null | awk '{printf "↑%s ↓%s", $1, $2}')
+  printf '%s%s%s  %s%s%s %s%s%s\n' "$B" "$(basename "$top")" "$R" "$G" "$branch" "$R" "$D" "${up:+→ $up $ab}" "$R"
+
+  section "remotes"
+  git remote -v | awk '$3=="(fetch)"{printf "  %-10s %s\n", $1, $2}'
+
+  local wt; wt=$(git worktree list 2>/dev/null)
+  if [ "$(wc -l <<<"$wt")" -gt 1 ]; then
+    section "worktrees"
+    sed "s|$HOME|~|" <<<"$wt" | cut -c1-"$cols" | sed 's/^/  /'
+  fi
+
+  local stashes; stashes=$(git stash list 2>/dev/null | wc -l | tr -d ' ')
+  [ "$stashes" != 0 ] && printf '%s  stashes: %s%s\n' "$M" "$stashes" "$R"
+
+  section "branches (recent)"
+  git for-each-ref --sort=-committerdate --count=5 refs/heads \
+    --format='  %(if)%(HEAD)%(then)*%(else) %(end) %(refname:short) %(color:dim)%(committerdate:relative)%(color:reset)' --color=always
+
+  section "changes"
+  local st; st=$(git -c color.status=always status --short | head -8)
+  if [ -n "$st" ]; then sed 's/^/  /' <<<"$st"; else echo "  ${D}clean${R}"; fi
+
+  if command -v tt >/dev/null && [ "$(tt count 2>/dev/null)" != 0 ]; then
+    section "tasks"
+    TT_COLOR=0 tt ls 2>/dev/null | head -5 | cut -c18- | sed 's/^/  /'
+  fi
+
+  section "log"
+  local used=$(( 14 + $(git remote | wc -l) ))
+  git log --graph --color=always --date=relative \
+    --format='%C(yellow)%h%C(reset) %s %C(dim)%ar%C(reset)%C(auto)%d' \
+    -n $(( rows > used + 4 ? rows - used : 4 ))
+}
+
+# Clip long lines at the pane edge instead of wrapping (DECAWM off).
+trap 'printf "\e[?7h"; tput cnorm; exit' INT TERM
+tput civis; printf '\e[?7l'
+while true; do
+  frame=$(draw 2>&1 | head -n "$(tput lines)")
+  printf '\e[H\e[2J%s' "$frame"
+  read -rsn1 -t 3 key && [ "$key" = q ] && break
+done
+printf '\e[?7h'; tput cnorm
