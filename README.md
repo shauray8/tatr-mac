@@ -46,6 +46,7 @@ tt new "title" -p 10 -t bug,ci
 tt show ID | tt edit ID     # edit opens $EDITOR (default vim)
 tt close ID | tt reopen ID
 tt state ID blocked
+tt prio ID 10               # lower sorts first
 tt note ID "found the root cause"
 tt pick                     # fzf picker
 ```

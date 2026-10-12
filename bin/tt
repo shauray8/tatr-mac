@@ -6,6 +6,7 @@
   tt new "title" [-p N] [-t tag,tag]
   tt show ID | edit ID | close ID | reopen ID
   tt state ID doing|blocked|review|todo   finer state, kept as a STATE property
+  tt prio ID N                set priority (lower sorts first)
   tt note ID text...          append a dated note
   tt pick                     fzf picker (used by the tmux popup)
   tt count                    number of open tasks (for the status bar)
@@ -205,6 +206,8 @@ def main(argv: list[str]) -> None:
         t.set_prop("STATUS", "OPEN")
     elif cmd == "state":
         t.set_prop("STATE", args[1])
+    elif cmd == "prio":
+        t.set_prop("PRIORITY", str(int(args[1])))
     elif cmd == "cycle":
         order = ["todo", "doing", "blocked", "review"]
         cur = t.props.get("STATE", "todo")
